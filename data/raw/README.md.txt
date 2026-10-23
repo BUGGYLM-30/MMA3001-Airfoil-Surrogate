@@ -1,0 +1,1 @@
+Raw aerodynamic data generated using XFOIL.

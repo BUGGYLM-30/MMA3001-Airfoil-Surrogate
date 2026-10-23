@@ -1,0 +1,1 @@
+External validation data including experimental airfoil measurements.
