@@ -1,4 +1,5 @@
 from pathlib import Path
+import time
 
 import pandas as pd
 
@@ -11,7 +12,9 @@ from xfoil_runner import run_xfoil
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
-PROCESSED_DATA_DIR = PROJECT_ROOT / "data" / "processed"
+PROCESSED_DATA_DIR = (
+    PROJECT_ROOT / "data" / "processed"
+)
 
 
 # ---------------------------------------------------------
@@ -29,6 +32,16 @@ def get_naca_features(naca):
     maximum camber = 0.02
     camber position = 0.40
     thickness = 0.12
+
+    Parameters
+    ----------
+    naca : str
+        Four-digit NACA airfoil code.
+
+    Returns
+    -------
+    tuple
+        Maximum camber, camber position and thickness.
     """
 
     naca = str(naca)
@@ -42,7 +55,16 @@ def get_naca_features(naca):
     camber_position = int(naca[1]) / 10
     thickness = int(naca[2:4]) / 100
 
-    return max_camber, camber_position, thickness
+    # Symmetric airfoils have no meaningful
+    # camber position.
+    if max_camber == 0:
+        camber_position = 0.0
+
+    return (
+        max_camber,
+        camber_position,
+        thickness,
+    )
 
 
 # ---------------------------------------------------------
@@ -52,21 +74,36 @@ def get_naca_features(naca):
 def load_xfoil_polar(file_path):
     """
     Read an XFOIL polar text file into a DataFrame.
+
+    Parameters
+    ----------
+    file_path : Path
+        Path to an XFOIL polar output file.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Clean aerodynamic operating-point data.
     """
 
-    with open(file_path, "r") as f:
-        lines = f.readlines()
+    with open(file_path, "r") as file:
+        lines = file.readlines()
 
     header_index = None
 
     for i, line in enumerate(lines):
-        if "alpha" in line and "CL" in line and "CD" in line:
+        if (
+            "alpha" in line
+            and "CL" in line
+            and "CD" in line
+        ):
             header_index = i
             break
 
     if header_index is None:
         raise ValueError(
-            f"Could not locate XFOIL data header in {file_path}"
+            f"Could not locate XFOIL header "
+            f"in {file_path}"
         )
 
     data = pd.read_csv(
@@ -84,46 +121,173 @@ def load_xfoil_polar(file_path):
         ],
     )
 
-    # Convert everything to numbers.
+    # Convert values to numeric.
     # Invalid rows become NaN.
     data = data.apply(
         pd.to_numeric,
         errors="coerce",
     )
 
-    # CL and CD are essential for this project.
+    # CL, CD and alpha are essential.
     data = data.dropna(
-        subset=["alpha", "CL", "CD"]
+        subset=[
+            "alpha",
+            "CL",
+            "CD",
+        ]
     )
 
     return data
 
 
 # ---------------------------------------------------------
-# Dataset generation
+# Run XFOIL with automatic retry
 # ---------------------------------------------------------
 
-def generate_pilot_dataset():
+def run_with_retry(
+    naca,
+    reynolds,
+    alpha_start,
+    alpha_end,
+    alpha_step,
+    max_attempts=2,
+):
     """
-    Generate a small pilot aerodynamic dataset.
+    Run XFOIL and retry if the entire process fails.
 
-    This is used to verify the full data-generation
-    workflow before generating the final large dataset.
+    Individual non-converged angles are retained as
+    missing operating points. A retry is only performed
+    when the complete XFOIL process fails.
+
+    Parameters
+    ----------
+    naca : str
+        NACA 4-digit airfoil code.
+    reynolds : int
+        Reynolds number.
+    alpha_start : float
+        Minimum angle of attack.
+    alpha_end : float
+        Maximum angle of attack.
+    alpha_step : float
+        Angle increment.
+    max_attempts : int
+        Maximum number of complete XFOIL attempts.
+
+    Returns
+    -------
+    tuple
+        Polar file path and number of attempts used.
     """
+
+    last_error = None
+
+    for attempt in range(
+        1,
+        max_attempts + 1,
+    ):
+
+        try:
+
+            print(
+                f"Attempt {attempt}/{max_attempts}"
+            )
+
+            polar_file = run_xfoil(
+                naca=naca,
+                reynolds=reynolds,
+                alpha_start=alpha_start,
+                alpha_end=alpha_end,
+                alpha_step=alpha_step,
+            )
+
+            return polar_file, attempt
+
+        except Exception as error:
+
+            last_error = error
+
+            print()
+            print(
+                f"Attempt {attempt} failed:"
+            )
+            print(error)
+
+            if attempt < max_attempts:
+
+                print(
+                    "Retrying XFOIL run..."
+                )
+
+                # Brief pause to ensure the previous
+                # XFOIL process has fully terminated.
+                time.sleep(2)
+
+    raise RuntimeError(
+        f"XFOIL failed after {max_attempts} "
+        f"attempts for NACA {naca}, "
+        f"Re = {reynolds}. "
+        f"Final error: {last_error}"
+    )
+
+
+# ---------------------------------------------------------
+# Final dataset generation
+# ---------------------------------------------------------
+
+def generate_final_dataset():
+    """
+    Generate the final aerodynamic dataset for the
+    MMA3001 airfoil surrogate-model project.
+    """
+
+    # -----------------------------------------------------
+    # Final NACA geometry grid
+    # -----------------------------------------------------
 
     airfoils = [
+
+        # Symmetric airfoils
         "0009",
+        "0012",
         "0015",
+
+        # 2% maximum camber, p = 0.2
+        "2209",
         "2212",
+        "2215",
+
+        # 2% maximum camber, p = 0.4
+        "2409",
         "2412",
+        "2415",
+
+        # 2% maximum camber, p = 0.6
+        "2609",
         "2612",
+        "2615",
+
+        # 4% maximum camber, p = 0.2
+        "4209",
+        "4212",
+        "4215",
+
+        # 4% maximum camber, p = 0.4
+        "4409",
+        "4412",
         "4415",
-        "6412",
+
+        # 4% maximum camber, p = 0.6
+        "4609",
+        "4612",
+        "4615",
     ]
 
     reynolds_numbers = [
         100000,
         200000,
+        300000,
+        400000,
         500000,
     ]
 
@@ -131,7 +295,7 @@ def generate_pilot_dataset():
     alpha_end = 12
     alpha_step = 1
 
-    expected_points = 19
+    expected_points_per_run = 19
 
     all_data = []
     summary_rows = []
@@ -141,26 +305,55 @@ def generate_pilot_dataset():
         * len(reynolds_numbers)
     )
 
+    total_expected_points = (
+        total_runs
+        * expected_points_per_run
+    )
+
     run_number = 0
 
     print()
-    print("======================================")
-    print("MMA3001 XFOIL PILOT DATASET GENERATOR")
-    print("======================================")
+    print(
+        "=========================================="
+    )
+    print(
+        "MMA3001 FINAL XFOIL DATASET GENERATOR"
+    )
+    print(
+        "=========================================="
+    )
+
     print()
-    print(f"Airfoils: {len(airfoils)}")
+    print(
+        f"Airfoils: {len(airfoils)}"
+    )
+
     print(
         f"Reynolds numbers: "
         f"{len(reynolds_numbers)}"
     )
-    print(f"Total XFOIL runs: {total_runs}")
-    print()
+
+    print(
+        f"Total XFOIL runs: "
+        f"{total_runs}"
+    )
+
+    print(
+        f"Maximum aerodynamic points: "
+        f"{total_expected_points}"
+    )
+
+    # -----------------------------------------------------
+    # Run every airfoil / Reynolds combination
+    # -----------------------------------------------------
 
     for naca in airfoils:
 
-        max_camber, camber_position, thickness = (
-            get_naca_features(naca)
-        )
+        (
+            max_camber,
+            camber_position,
+            thickness,
+        ) = get_naca_features(naca)
 
         for reynolds in reynolds_numbers:
 
@@ -168,34 +361,54 @@ def generate_pilot_dataset():
 
             print()
             print(
+                "=========================================="
+            )
+
+            print(
                 f"RUN {run_number}/{total_runs}"
             )
+
             print(
-                f"NACA {naca} | Re = {reynolds}"
+                f"NACA {naca} | "
+                f"Re = {reynolds}"
+            )
+
+            print(
+                "=========================================="
             )
 
             try:
-                polar_file = run_xfoil(
+
+                (
+                    polar_file,
+                    attempts_used,
+                ) = run_with_retry(
                     naca=naca,
                     reynolds=reynolds,
                     alpha_start=alpha_start,
                     alpha_end=alpha_end,
                     alpha_step=alpha_step,
+                    max_attempts=2,
                 )
 
                 polar = load_xfoil_polar(
                     polar_file
                 )
 
-                converged_points = len(polar)
+                converged_points = len(
+                    polar
+                )
 
                 coverage = (
                     converged_points
-                    / expected_points
+                    / expected_points_per_run
                     * 100
                 )
 
+                # -----------------------------------------
                 # Add engineering input variables
+                # -----------------------------------------
+
                 polar["airfoil"] = (
                     f"NACA {naca}"
                 )
@@ -216,26 +429,40 @@ def generate_pilot_dataset():
                     reynolds
                 )
 
-                all_data.append(polar)
+                all_data.append(
+                    polar
+                )
 
                 summary_rows.append(
                     {
-                        "airfoil": f"NACA {naca}",
-                        "reynolds": reynolds,
+                        "airfoil":
+                            f"NACA {naca}",
+
+                        "reynolds":
+                            reynolds,
+
                         "expected_points":
-                            expected_points,
+                            expected_points_per_run,
+
                         "converged_points":
                             converged_points,
+
                         "coverage_percent":
                             coverage,
-                        "status": "success",
+
+                        "attempts_used":
+                            attempts_used,
+
+                        "status":
+                            "success",
                     }
                 )
 
+                print()
                 print(
                     f"Converged points: "
                     f"{converged_points}/"
-                    f"{expected_points}"
+                    f"{expected_points_per_run}"
                 )
 
                 print(
@@ -245,34 +472,47 @@ def generate_pilot_dataset():
 
             except Exception as error:
 
+                print()
                 print(
-                    f"RUN FAILED: {error}"
+                    "RUN FAILED AFTER RETRY"
                 )
+
+                print(error)
 
                 summary_rows.append(
                     {
                         "airfoil":
                             f"NACA {naca}",
+
                         "reynolds":
                             reynolds,
+
                         "expected_points":
-                            expected_points,
+                            expected_points_per_run,
+
                         "converged_points":
                             0,
+
                         "coverage_percent":
-                            0,
+                            0.0,
+
+                        "attempts_used":
+                            2,
+
                         "status":
                             f"failed: {error}",
                     }
                 )
 
     # -----------------------------------------------------
-    # Combine all successful aerodynamic data
+    # Combine successful aerodynamic data
     # -----------------------------------------------------
 
     if not all_data:
+
         raise RuntimeError(
-            "No XFOIL runs produced usable data."
+            "No XFOIL simulations produced "
+            "usable aerodynamic data."
         )
 
     dataset = pd.concat(
@@ -280,7 +520,10 @@ def generate_pilot_dataset():
         ignore_index=True,
     )
 
-    # Put important ML inputs/outputs first
+    # -----------------------------------------------------
+    # Arrange columns
+    # -----------------------------------------------------
+
     column_order = [
         "airfoil",
         "max_camber",
@@ -296,11 +539,30 @@ def generate_pilot_dataset():
         "Bot_Xtr",
     ]
 
-    dataset = dataset[column_order]
+    dataset = dataset[
+        column_order
+    ]
+
+    # Sort into a consistent order.
+    dataset = dataset.sort_values(
+        by=[
+            "max_camber",
+            "camber_position",
+            "thickness",
+            "reynolds",
+            "alpha",
+        ]
+    ).reset_index(
+        drop=True
+    )
 
     summary = pd.DataFrame(
         summary_rows
     )
+
+    # -----------------------------------------------------
+    # Save final outputs
+    # -----------------------------------------------------
 
     PROCESSED_DATA_DIR.mkdir(
         parents=True,
@@ -309,12 +571,12 @@ def generate_pilot_dataset():
 
     dataset_path = (
         PROCESSED_DATA_DIR
-        / "airfoil_dataset_pilot.csv"
+        / "airfoil_dataset_final.csv"
     )
 
     summary_path = (
         PROCESSED_DATA_DIR
-        / "generation_summary_pilot.csv"
+        / "generation_summary_final.csv"
     )
 
     dataset.to_csv(
@@ -327,29 +589,110 @@ def generate_pilot_dataset():
         index=False,
     )
 
-    print()
-    print("======================================")
-    print("PILOT DATASET COMPLETE")
-    print("======================================")
-    print()
+    # -----------------------------------------------------
+    # Final generation statistics
+    # -----------------------------------------------------
 
+    total_obtained = len(
+        dataset
+    )
+
+    overall_coverage = (
+        total_obtained
+        / total_expected_points
+        * 100
+    )
+
+    failed_runs = (
+        summary["status"]
+        .str.startswith("failed")
+        .sum()
+    )
+
+    partial_runs = (
+        (
+            summary["converged_points"]
+            > 0
+        )
+        &
+        (
+            summary["converged_points"]
+            < expected_points_per_run
+        )
+    ).sum()
+
+    full_runs = (
+        summary["converged_points"]
+        == expected_points_per_run
+    ).sum()
+
+    print()
     print(
-        f"Total aerodynamic rows: "
-        f"{len(dataset)}"
+        "=========================================="
     )
 
     print(
-        f"Dataset saved to:\n"
-        f"{dataset_path}"
+        "FINAL DATASET COMPLETE"
+    )
+
+    print(
+        "=========================================="
     )
 
     print()
 
     print(
-        f"Generation summary saved to:\n"
-        f"{summary_path}"
+        f"Expected aerodynamic points: "
+        f"{total_expected_points}"
+    )
+
+    print(
+        f"Obtained aerodynamic points: "
+        f"{total_obtained}"
+    )
+
+    print(
+        f"Overall coverage: "
+        f"{overall_coverage:.2f}%"
+    )
+
+    print()
+
+    print(
+        f"Complete XFOIL runs: "
+        f"{full_runs}"
+    )
+
+    print(
+        f"Partial XFOIL runs: "
+        f"{partial_runs}"
+    )
+
+    print(
+        f"Failed XFOIL runs: "
+        f"{failed_runs}"
+    )
+
+    print()
+
+    print(
+        "Dataset saved to:"
+    )
+
+    print(
+        dataset_path
+    )
+
+    print()
+
+    print(
+        "Generation summary saved to:"
+    )
+
+    print(
+        summary_path
     )
 
 
 if __name__ == "__main__":
-    generate_pilot_dataset()
+    generate_final_dataset()

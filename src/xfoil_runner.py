@@ -25,6 +25,12 @@ def run_xfoil(
     """
     Run XFOIL for a NACA 4-digit airfoil.
 
+    The angle-of-attack sweep begins at 0 degrees and
+    moves toward positive angles first. XFOIL is then
+    reinitialised before sweeping toward negative angles.
+    This improves convergence compared with one continuous
+    sweep from negative to positive angles.
+
     Parameters
     ----------
     naca : str
@@ -32,9 +38,9 @@ def run_xfoil(
     reynolds : int
         Reynolds number.
     alpha_start : float
-        Starting angle of attack in degrees.
+        Minimum angle of attack in degrees.
     alpha_end : float
-        Final angle of attack in degrees.
+        Maximum angle of attack in degrees.
     alpha_step : float
         Angle-of-attack increment in degrees.
 
@@ -44,60 +50,114 @@ def run_xfoil(
         Path to the generated XFOIL polar file.
     """
 
-    RAW_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    RAW_DATA_DIR.mkdir(
+        parents=True,
+        exist_ok=True
+    )
 
-    output_name = f"naca{naca}_re{reynolds}_auto.txt"
-    output_path = RAW_DATA_DIR / output_name
+    output_name = (
+        f"naca{naca}_re{reynolds}_auto.txt"
+    )
 
-    # Remove old output so each run starts cleanly
+    output_path = (
+        RAW_DATA_DIR / output_name
+    )
+
+    # Remove the previous output file so every
+    # simulation starts with a clean result file.
     if output_path.exists():
         output_path.unlink()
+
+    # -----------------------------------------------------
+    # Commands sent directly to XFOIL
+    # -----------------------------------------------------
 
     commands = [
         f"NACA {naca}",
         "OPER",
+
         f"VISC {reynolds}",
-        "ITER 100",
+
+        # Give difficult cases more iterations
+        "ITER 200",
+
+        # Start saving polar data
         "PACC",
         output_name,
-        "",  # No dump file
-        f"ASEQ {alpha_start} {alpha_end} {alpha_step}",
+
+        # No dump file
+        "",
+
+        # Positive angle sweep:
+        # 0, 1, 2, ... 12 degrees
+        f"ASEQ 0 {alpha_end} {alpha_step}",
+
+        # Reset boundary-layer solution before
+        # changing sweep direction
+        "INIT",
+
+        # Negative angle sweep:
+        # -1, -2, ... -6 degrees
+        f"ASEQ -1 {alpha_start} {-alpha_step}",
+
+        # Stop polar accumulation
         "PACC",
-        "",  # Return from OPER menu
+
+        # Return from OPER menu
+        "",
+
+        # Exit XFOIL
         "QUIT",
     ]
 
-    command_text = "\n".join(commands) + "\n"
+    command_text = (
+        "\n".join(commands) + "\n"
+    )
 
-    print("Running XFOIL...")
+    print()
+    print("--------------------------------------")
+    print("Running XFOIL")
+    print("--------------------------------------")
     print(f"Airfoil: NACA {naca}")
     print(f"Reynolds number: {reynolds}")
     print(
-        f"Angle range: {alpha_start} to "
-        f"{alpha_end} degrees"
+        f"Angle range: "
+        f"{alpha_start} to {alpha_end} degrees"
     )
 
-    result = subprocess.run(
-        [str(XFOIL_EXE)],
-        input=command_text,
-        text=True,
-        cwd=RAW_DATA_DIR,
-        capture_output=True,
-        timeout=120,
-    )
+    try:
+        result = subprocess.run(
+            [str(XFOIL_EXE)],
+            input=command_text,
+            text=True,
+            cwd=RAW_DATA_DIR,
+            capture_output=True,
+
+            # Allow difficult cases more time
+            timeout=300,
+        )
+
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError(
+            f"XFOIL timed out for NACA {naca} "
+            f"at Re = {reynolds}"
+        ) from error
 
     if result.returncode != 0:
+        print()
         print("XFOIL returned an error:")
         print(result.stderr)
 
     if not output_path.exists():
         raise FileNotFoundError(
-            "XFOIL finished but the polar file was not created."
+            f"XFOIL finished but did not create "
+            f"the polar file for NACA {naca}, "
+            f"Re = {reynolds}."
         )
 
     print()
     print("XFOIL run completed successfully.")
-    print(f"Results saved to:")
+    print("Results saved to:")
     print(output_path)
 
     return output_path
